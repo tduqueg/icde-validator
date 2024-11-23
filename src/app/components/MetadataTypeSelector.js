@@ -1,4 +1,4 @@
-// components/MetadataTypeSelector.js
+
 import { useState } from "react";
 
 const MetadataTypeSelector = ({ onTypeSelect }) => {
