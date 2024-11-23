@@ -2,17 +2,14 @@ import { useState } from 'react';
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import JSZip from "jszip";
 
-console.log(process.env.REACT_APP_AWS_SECRET_ACCESS_KEY); // Para verificar que se lee correctamente
-console.log(process.env.REACT_APP_AWS_ACCESS_KEY_ID); // Para verificar que se lee correctamente
-console.log(process.env.REACT_APP_AWS_SESSION_TOKEN); // Para verificar que se lee correctamente
 
 // Configuración del cliente S3 específica para AWS Academy
 const s3Client = new S3Client({
   region: 'us-east-1', 
   credentials: {
-    accessKeyId: process.env.REACT_APP_AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.REACT_APP_AWS_SECRET_ACCESS_KEY,
-    sessionToken: process.env.REACT_APP_AWS_SESSION_TOKEN 
+    accessKeyId: process.env.NEXT_PUBLIC_AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.NEXT_PUBLIC_AWS_SECRET_ACCESS_KEY,
+    sessionToken: process.env.NEXT_PUBLIC_AWS_SESSION_TOKEN 
   }
 });
 
