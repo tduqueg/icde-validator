@@ -2,6 +2,7 @@ import { useState } from "react";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import JSZip from "jszip";
 
+console.log("Server IP:", process.env.NEXT_PUBLIC_SERVER_IP);
 // Data type enum mapping
 const DataTypes = {
   GDB: 0,
@@ -108,21 +109,109 @@ const DataUpload = ({ selectedType }) => {
   const uploadToS3 = async (file) => {
     try {
       const timestamp = Date.now();
-      const uniqueFileName = `files/${selectedType.toLowerCase()}/${selectedSubtype}/${timestamp}_${
-        file.name
-      }`;
-      const bucketName = "proyecto-icdc";
+      const bucketName = process.env.NEXT_PUBLIC_AWS_BUCKET_NAME;
 
-      const uploadParams = {
-        Bucket: bucketName,
-        Key: uniqueFileName,
-        Body: file,
-        ContentType: file.type,
-      };
+      if (
+        file.type === "application/zip" ||
+        file.type === "application/x-zip-compressed"
+      ) {
+        // Leer el archivo como ArrayBuffer
+        const zipBuffer = await file.arrayBuffer();
+        const zip = new JSZip();
 
-      const command = new PutObjectCommand(uploadParams);
-      await s3Client.send(command);
-      return `s3://${bucketName}/${uniqueFileName}`;
+        // Cargar el ZIP con opciones específicas para GDB
+        const zipContents = await zip.loadAsync(zipBuffer, {
+          createFolders: true,
+          checkCRC32: false, // Deshabilitar verificación CRC32 para archivos problemáticos
+        });
+
+        const uploadPromises = [];
+        let totalFiles = 0;
+        let processedFiles = 0;
+
+        // Primero, contar archivos válidos y encontrar la carpeta GDB
+        let gdbFolderName = "";
+        for (const [filename, zipEntry] of Object.entries(zipContents.files)) {
+          if (!zipEntry.dir && filename.includes(".gdb/")) {
+            totalFiles++;
+            if (!gdbFolderName) {
+              gdbFolderName = filename.split(".gdb/")[0] + ".gdb";
+            }
+          }
+        }
+
+        // Procesar solo los archivos dentro de la carpeta GDB
+        for (const [filename, zipEntry] of Object.entries(zipContents.files)) {
+          if (!zipEntry.dir && filename.startsWith(gdbFolderName)) {
+            try {
+              // Usar Uint8Array para mejor manejo de datos binarios
+              const content = await zipEntry.async("uint8array", {
+                compression: "STORE", // Sin compresión adicional
+              });
+
+              // Mantener la estructura de carpetas original
+              const relativePath = filename.split(gdbFolderName + "/")[1];
+              const s3Key = `files/${selectedType.toLowerCase()}/${selectedSubtype}/${timestamp}_${gdbFolderName}/${relativePath}`;
+
+              // Crear el Blob con el tipo MIME correcto
+              const blob = new Blob([content], {
+                type: "application/octet-stream",
+              });
+
+              const uploadParams = {
+                Bucket: bucketName,
+                Key: s3Key,
+                Body: blob,
+                ContentType: "application/octet-stream",
+              };
+
+              const command = new PutObjectCommand(uploadParams);
+
+              uploadPromises.push(
+                s3Client
+                  .send(command)
+                  .then(() => {
+                    processedFiles++;
+                    const progress = (processedFiles / totalFiles) * 100;
+                    console.log(
+                      `Uploaded ${filename} - Progress: ${progress}%`
+                    );
+                  })
+                  .catch((err) => {
+                    console.error(`Error al subir ${filename}:`, err);
+                    throw new Error(
+                      `Error al subir ${filename}: ${err.message}`
+                    );
+                  })
+              );
+            } catch (err) {
+              console.error(`Error procesando ${filename}:`, err);
+              continue; // Continuar con el siguiente archivo si hay error
+            }
+          }
+        }
+
+        // Esperar a que todas las subidas terminen
+        await Promise.all(uploadPromises);
+
+        return `s3://${bucketName}/files/${selectedType.toLowerCase()}/${selectedSubtype}/${timestamp}_${gdbFolderName}`;
+      } else {
+        // Si no es ZIP, mantener la lógica original
+        const uniqueFileName = `files/${selectedType.toLowerCase()}/${selectedSubtype}/${timestamp}_${
+          file.name
+        }`;
+
+        const uploadParams = {
+          Bucket: bucketName,
+          Key: uniqueFileName,
+          Body: file,
+          ContentType: file.type,
+        };
+
+        const command = new PutObjectCommand(uploadParams);
+        await s3Client.send(command);
+        return `s3://${bucketName}/${uniqueFileName}`;
+      }
     } catch (error) {
       console.error("Error detallado de S3:", error);
       if (error.name === "CredentialsProviderError") {
@@ -220,16 +309,20 @@ const DataUpload = ({ selectedType }) => {
 
       setUploadProgress(50);
 
-      const response = await fetch("http://dominio:8000/process-data/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          data_type: dataType,
-          s3_bucket_uri: s3Uri,
-        }),
-      });
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_SERVER_IP}/process-data/`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            data_type: dataType,
+            s3_bucket_uri: s3Uri,
+          }),
+        }
+      );
+      console.log("Proceso de datos completado:", response);
 
       const data = await response.json();
 
