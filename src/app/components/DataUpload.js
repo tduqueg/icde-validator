@@ -2,7 +2,6 @@ import { useState } from "react";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import JSZip from "jszip";
 
-console.log("Server IP:", process.env.NEXT_PUBLIC_SERVER_IP);
 // Data type enum mapping
 const DataTypes = {
   GDB: 0,
@@ -112,91 +111,114 @@ const DataUpload = ({ selectedType }) => {
       const bucketName = process.env.NEXT_PUBLIC_AWS_BUCKET_NAME;
 
       if (
+        file.type === "application/x-zip-compressed" ||
         file.type === "application/zip" ||
-        file.type === "application/x-zip-compressed"
+        file.type === "application/x-rar-compressed" ||
+        file.type === "application/x-7z-compressed" ||
+        file.type === "application/rar" ||
+        file.type === "application/7z"
       ) {
-        // Leer el archivo como ArrayBuffer
         const zipBuffer = await file.arrayBuffer();
         const zip = new JSZip();
 
-        // Cargar el ZIP con opciones específicas para GDB
         const zipContents = await zip.loadAsync(zipBuffer, {
           createFolders: true,
-          checkCRC32: false, // Deshabilitar verificación CRC32 para archivos problemáticos
+          checkCRC32: false,
         });
 
-        const uploadPromises = [];
-        let totalFiles = 0;
-        let processedFiles = 0;
+        // Analizar el contenido del ZIP
+        const files = Object.entries(zipContents.files);
 
-        // Primero, contar archivos válidos y encontrar la carpeta GDB
-        let gdbFolderName = "";
-        for (const [filename, zipEntry] of Object.entries(zipContents.files)) {
-          if (!zipEntry.dir && filename.includes(".gdb/")) {
-            totalFiles++;
-            if (!gdbFolderName) {
+        // Verificar si hay un archivo GDB
+        const hasGdbFolder = files.some(([filename]) =>
+          filename.toLowerCase().includes(".gdb/")
+        );
+
+        if (hasGdbFolder) {
+          // Caso 1: ZIP contiene una carpeta GDB
+          const uploadPromises = [];
+          let gdbFolderName = "";
+
+          // Encontrar el nombre base de la carpeta GDB
+          for (const [filename] of files) {
+            if (
+              filename.toLowerCase().includes(".gdb/") ||
+              filename.toLowerCase().includes(".gdb\\") ||
+              filename.toLowerCase().endsWith(".gdb")
+            ) {
               gdbFolderName = filename.split(".gdb/")[0] + ".gdb";
+              break;
             }
           }
-        }
 
-        // Procesar solo los archivos dentro de la carpeta GDB
-        for (const [filename, zipEntry] of Object.entries(zipContents.files)) {
-          if (!zipEntry.dir && filename.startsWith(gdbFolderName)) {
+          // Filtrar archivos no deseados y procesar solo los necesarios
+          for (const [filename, zipEntry] of files) {
+            // Ignorar archivos de bloqueo y otros archivos temporales
+            if (
+              filename.includes(".lock") ||
+              filename.includes(".tmp") ||
+              zipEntry.dir ||
+              !filename.startsWith(gdbFolderName)
+            ) {
+              continue;
+            }
+
             try {
-              // Usar Uint8Array para mejor manejo de datos binarios
-              const content = await zipEntry.async("uint8array", {
-                compression: "STORE", // Sin compresión adicional
-              });
-
-              // Mantener la estructura de carpetas original
+              // Intenta descomprimir el archivo
+              const content = await zipEntry.async("uint8array");
               const relativePath = filename.split(gdbFolderName + "/")[1];
-              const s3Key = `files/${selectedType.toLowerCase()}/${selectedSubtype}/${timestamp}_${gdbFolderName}/${relativePath}`;
 
-              // Crear el Blob con el tipo MIME correcto
-              const blob = new Blob([content], {
-                type: "application/octet-stream",
-              });
+              if (!relativePath) continue; // Saltar si no hay ruta relativa
+
+              const s3Key = `files/${selectedType.toLowerCase()}/${selectedSubtype}/${timestamp}_${gdbFolderName}/${relativePath}`;
 
               const uploadParams = {
                 Bucket: bucketName,
                 Key: s3Key,
-                Body: blob,
+                Body: new Blob([content], { type: "application/octet-stream" }),
                 ContentType: "application/octet-stream",
               };
 
               const command = new PutObjectCommand(uploadParams);
-
-              uploadPromises.push(
-                s3Client
-                  .send(command)
-                  .then(() => {
-                    processedFiles++;
-                    const progress = (processedFiles / totalFiles) * 100;
-                    console.log(
-                      `Uploaded ${filename} - Progress: ${progress}%`
-                    );
-                  })
-                  .catch((err) => {
-                    console.error(`Error al subir ${filename}:`, err);
-                    throw new Error(
-                      `Error al subir ${filename}: ${err.message}`
-                    );
-                  })
-              );
+              await s3Client.send(command);
             } catch (err) {
-              console.error(`Error procesando ${filename}:`, err);
-              continue; // Continuar con el siguiente archivo si hay error
+              console.error(`Error al procesar archivo ${filename}:`, err);
+              // Continuar con los siguientes archivos
+              continue;
             }
           }
+
+          await Promise.all(uploadPromises);
+          return `s3://${bucketName}/files/${selectedType.toLowerCase()}/${selectedSubtype}/${timestamp}_${gdbFolderName}`;
+        } else {
+          // Caso 2: ZIP contiene archivos directos (como TIF)
+          const mainFile = files.find(
+            ([filename, entry]) =>
+              !entry.dir &&
+              (filename.endsWith(".tif") || filename.endsWith(".img"))
+          );
+
+          if (!mainFile) {
+            throw new Error("No se encontró un archivo válido en el ZIP");
+          }
+
+          const [filename, zipEntry] = mainFile;
+          const content = await zipEntry.async("uint8array");
+          const s3Key = `files/${selectedType.toLowerCase()}/${selectedSubtype}/${timestamp}_${filename}`;
+
+          const uploadParams = {
+            Bucket: bucketName,
+            Key: s3Key,
+            Body: new Blob([content], { type: "application/octet-stream" }),
+            ContentType: "application/octet-stream",
+          };
+
+          const command = new PutObjectCommand(uploadParams);
+          await s3Client.send(command);
+          return `s3://${bucketName}/${s3Key}`;
         }
-
-        // Esperar a que todas las subidas terminen
-        await Promise.all(uploadPromises);
-
-        return `s3://${bucketName}/files/${selectedType.toLowerCase()}/${selectedSubtype}/${timestamp}_${gdbFolderName}`;
       } else {
-        // Si no es ZIP, mantener la lógica original
+        // Caso 3: Archivo no ZIP (mantener lógica original)
         const uniqueFileName = `files/${selectedType.toLowerCase()}/${selectedSubtype}/${timestamp}_${
           file.name
         }`;
@@ -226,7 +248,11 @@ const DataUpload = ({ selectedType }) => {
   const handleGDBUpload = async (file) => {
     if (
       file.type === "application/x-zip-compressed" ||
-      file.type === "application/zip"
+      file.type === "application/zip" ||
+      file.type === "application/x-rar-compressed" ||
+      file.type === "application/x-7z-compressed" ||
+      file.type === "application/rar" ||
+      file.type === "application/7z"
     ) {
       try {
         const zip = new JSZip();
@@ -327,7 +353,10 @@ const DataUpload = ({ selectedType }) => {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.message || "Error en la validación del archivo");
+        throw new Error(
+          data.message || "Error en la validación del archivo",
+          response
+        );
       }
 
       setValidationResults(data);
@@ -338,6 +367,7 @@ const DataUpload = ({ selectedType }) => {
     } finally {
       setIsUploading(false);
     }
+    console.log("Proceso de subida finalizado.");
   };
 
   const getAcceptedFileTypes = () => {
